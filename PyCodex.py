@@ -14,6 +14,7 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 from google import genai
 from google.genai import types
+from openai import OpenAI
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -28,12 +29,38 @@ def get_base_dir() -> str:
 SCRIPT_DIR = get_base_dir()
 ICON_PATH = os.path.join(SCRIPT_DIR, "PyCodex.ico")
 DATA_FILE = os.path.join(SCRIPT_DIR, "pycodex_data.json")
+PROVIDERS_FILE = os.path.join(SCRIPT_DIR, "providers.json")
 
 # Все относительные пути инструментов ИИ будут считаться от папки проекта
 try:
     os.chdir(SCRIPT_DIR)
 except Exception:
     pass
+
+# ================= ПРОВАЙДЕРЫ И РОУТЕРЫ =================
+DEFAULT_PROVIDERS = {
+    "Google AI Studio": {
+        "base_url":"https://generativelanguage.googleapis.com/v1beta",
+        "models": [
+            "gemini-2.5-flash",
+            "gemini-1.5-pro"
+        ]
+    }
+}
+
+if not os.path.exists(PROVIDERS_FILE):
+    with open(PROVIDERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(DEFAULT_PROVIDERS, f, ensure_ascii=False, indent=2)
+
+def load_providers() -> dict:
+    try:
+        with open(PROVIDERS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict) and data:
+                return data
+    except Exception:
+        pass
+    return DEFAULT_PROVIDERS
 
 # ================= 1. ВШИТЫЙ БАЗОВЫЙ СИСТЕМНЫЙ ПРОМПТ =================
 CORE_SYSTEM_PROMPT = (
@@ -60,12 +87,6 @@ CORE_SYSTEM_PROMPT = (
 )
 
 DEFAULT_CUSTOM_PROMPT = "Отвечай на русском языке. Пиши понятно и кратко."
-
-MODELS = [
-    "gemini-3.8-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite"
-]
 
 # ================= ОЧИСТКА И ФОРМАТИРОВАНИЕ ТЕКСТА =================
 
@@ -240,14 +261,36 @@ ALL_TOOLS = [
 ]
 TOOLS_DICT = {fn.__name__: fn for fn in ALL_TOOLS}
 
+# Схема инструментов в формате OpenAI (для сторонних роутеров)
+OPENAI_TOOLS_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": tool_fn.__name__,
+            "description": tool_fn.__doc__ or tool_fn.__name__,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    k: {"type": "string"} for k in tool_fn.__code__.co_varnames[:tool_fn.__code__.co_argcount]
+                }
+            }
+        }
+    } for tool_fn in ALL_TOOLS
+]
+
 # ================= ХРАНИЛИЩЕ ДАННЫХ =================
 
 def load_data():
+    providers = load_providers()
+    default_prov = list(providers.keys())[0] if providers else "Google AI Studio"
+    default_model = providers[default_prov]["models"][0] if providers and providers[default_prov]["models"] else "gemini-2.5-flash"
+
     if not os.path.exists(DATA_FILE):
         return {
             "settings": {
                 "api_key": "",
-                "model": "gemini-3.8-flash",
+                "provider": default_prov,
+                "model": default_model,
                 "custom_prompt": DEFAULT_CUSTOM_PROMPT,
                 "mode": "Default"
             },
@@ -258,8 +301,10 @@ def load_data():
             data = json.load(f)
             if "system_prompt" in data.get("settings", {}):
                 data["settings"]["custom_prompt"] = data["settings"].pop("system_prompt")
-            if data.get("settings", {}).get("model") not in MODELS:
-                data["settings"]["model"] = "gemini-3.8-flash"
+            if "provider" not in data.get("settings", {}):
+                data["settings"]["provider"] = default_prov
+            if "model" not in data.get("settings", {}):
+                data["settings"]["model"] = default_model
             if "custom_prompt" not in data.get("settings", {}):
                 data["settings"]["custom_prompt"] = DEFAULT_CUSTOM_PROMPT
             return data
@@ -267,7 +312,8 @@ def load_data():
         return {
             "settings": {
                 "api_key": "",
-                "model": "gemini-3.8-flash",
+                "provider": default_prov,
+                "model": default_model,
                 "custom_prompt": DEFAULT_CUSTOM_PROMPT,
                 "mode": "Default"
             },
@@ -298,31 +344,27 @@ class PyCodex(ctk.CTk):
         self._load_chats_to_sidebar()
 
     def _set_icon(self):
-        # 1. Windows: свой AppUserModelID, иначе панель задач покажет иконку python.exe
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PyCodex.App.1.0")
         except Exception:
             pass
 
         if not os.path.exists(ICON_PATH):
-            print(f"Внимание: иконка не найдена по пути {ICON_PATH}")
             return
 
-        # 2. Иконка заголовка окна и Alt-Tab
         try:
             self.iconbitmap(ICON_PATH)
-        except Exception as e:
-            print(f"iconbitmap: {e}")
+        except Exception:
+            pass
 
-        # 3. Иконка на панели задач Windows — нужен именно PhotoImage из .ico через PIL
         try:
             from PIL import Image, ImageTk
             pil_img = Image.open(ICON_PATH).convert("RGBA")
             photo = ImageTk.PhotoImage(pil_img)
             self.iconphoto(True, photo)
-            self._taskbar_icon = photo  # обязательно сохранить ссылку, иначе Tkinter её удалит
-        except Exception as e:
-            print(f"iconphoto: {e} (поставь pillow: pip install pillow)")
+            self._taskbar_icon = photo
+        except Exception:
+            pass
 
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=0, minsize=240)
@@ -411,10 +453,11 @@ class PyCodex(ctk.CTk):
         return "break"
 
     def _update_badge(self):
-        m = self.data["settings"].get("model", "gemini-3.8-flash")
+        m = self.data["settings"].get("model", "gemini-2.5-flash")
+        prov = self.data["settings"].get("provider", "Google AI Studio")
         mode = self.data["settings"].get("mode", "Default")
         prefix = "🛡️" if mode == "Default" else "⚡"
-        self.badge_model.configure(text=f"{prefix}  {m}")
+        self.badge_model.configure(text=f"{prefix} [{prov}]  {m}")
 
     def _load_chats_to_sidebar(self):
         for widget in self.chat_scroll.winfo_children():
@@ -564,7 +607,7 @@ class PyCodex(ctk.CTk):
 
         api_key = self.data["settings"].get("api_key")
         if not api_key:
-            messagebox.showwarning("Настройки", "Задайте Google AI Studio API ключ в Настройках!")
+            messagebox.showwarning("Настройки", "Задайте API ключ в Настройках!")
             self.open_settings()
             return
 
@@ -597,76 +640,129 @@ class PyCodex(ctk.CTk):
 
     def _run_agent(self):
         try:
-            client = genai.Client(api_key=self.data["settings"]["api_key"])
-            model_name = self.data["settings"].get("model", "gemini-3.8-flash")
-            chat_obj = next(c for c in self.data["chats"] if c["id"] == self.current_chat_id)
+            providers = load_providers()
+            prov_name = self.data["settings"].get("provider", "Google AI Studio")
+            prov_config = providers.get(prov_name, {})
+            base_url = prov_config.get("base_url", "").strip()
+            api_key = self.data["settings"]["api_key"]
+            model_name = self.data["settings"].get("model", "gemini-2.5-flash")
 
+            chat_obj = next(c for c in self.data["chats"] if c["id"] == self.current_chat_id)
             user_custom_prompt = self.data["settings"].get("custom_prompt", "")
             combined_prompt = f"{CORE_SYSTEM_PROMPT}\n\n[Пользовательские инструкции]:\n{user_custom_prompt}"
 
-            config = types.GenerateContentConfig(
-                system_instruction=combined_prompt,
-                tools=ALL_TOOLS
-            )
+            # ================= РЕЖИМ 1: Сторонние роутеры (OpenAI формат) =================
+            if base_url:
+                client = OpenAI(base_url=base_url, api_key=api_key)
 
-            history = []
-            for m in chat_obj["messages"]:
-                if m["role"] == "user":
-                    history.append(types.Content(role="user", parts=[types.Part.from_text(text=m["content"])]))
-                elif m["role"] == "agent":
-                    history.append(types.Content(role="model", parts=[types.Part.from_text(text=m["content"])]))
+                messages = [{"role": "system", "content": combined_prompt}]
+                for m in chat_obj["messages"]:
+                    r = "assistant" if m["role"] == "agent" else m["role"]
+                    if r in ("user", "assistant"):
+                        messages.append({"role": r, "content": m["content"]})
 
-            session = client.chats.create(
-                model=model_name,
-                config=config,
-                history=history[:-1]
-            )
+                while True:
+                    response = client.chat.completions.create(
+                        model=model_name,
+                        messages=messages,
+                        tools=OPENAI_TOOLS_SCHEMA,
+                        tool_choice="auto"
+                    )
 
-            current_input = history[-1].parts[0].text
+                    msg = response.choices[0].message
 
-            while True:
-                stream = session.send_message_stream(current_input)
-
-                accumulated_text = ""
-                pending_function_calls = []
-                stream_bubble = None
-
-                for chunk in stream:
-                    if chunk.function_calls:
-                        pending_function_calls.extend(chunk.function_calls)
-
-                    if chunk.text:
-                        accumulated_text += chunk.text
-                        if not stream_bubble:
-                            stream_bubble = self._create_streaming_bubble()
-                        self._update_streaming_bubble(stream_bubble, accumulated_text)
-
-                if pending_function_calls:
-                    for call in pending_function_calls:
-                        fn_name = call.name
-                        fn_args = dict(call.args)
-
-                        allowed = self._check_tool_allowed(fn_name, fn_args)
-                        if allowed:
-                            self._append_message("system", f"🛠️ Вызов {fn_name}: {fn_args}")
-                            func = TOOLS_DICT.get(fn_name)
+                    if msg.tool_calls:
+                        messages.append(msg)
+                        for call in msg.tool_calls:
+                            fn_name = call.function.name
                             try:
-                                tool_res = func(**fn_args) if func else "Функция не найдена"
-                            except Exception as ex:
-                                tool_res = f"Ошибка вызова {fn_name}: {str(ex)}"
-                        else:
-                            tool_res = "Действие отменено пользователем."
-                            self._append_message("system", f"⛔ Отклонено пользователем: {fn_name}")
+                                fn_args = json.loads(call.function.arguments)
+                            except Exception:
+                                fn_args = {}
 
-                        current_input = types.Part.from_function_response(
-                            name=fn_name,
-                            response={"result": str(tool_res)}
-                        )
-                else:
-                    if accumulated_text:
-                        chat_obj["messages"].append({"role": "agent", "content": accumulated_text})
-                        save_data(self.data)
-                    break
+                            allowed = self._check_tool_allowed(fn_name, fn_args)
+                            if allowed:
+                                self._append_message("system", f"🛠️ Вызов {fn_name}: {fn_args}")
+                                func = TOOLS_DICT.get(fn_name)
+                                tool_res = func(**fn_args) if func else "Функция не найдена"
+                            else:
+                                tool_res = "Действие отменено пользователем."
+                                self._append_message("system", f"⛔ Отклонено пользователем: {fn_name}")
+
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": call.id,
+                                "content": str(tool_res)
+                            })
+                    else:
+                        accumulated_text = msg.content or ""
+                        if accumulated_text:
+                            chat_obj["messages"].append({"role": "agent", "content": accumulated_text})
+                            save_data(self.data)
+                            self._add_bubble("agent", accumulated_text)
+                        break
+
+            # ================= РЕЖИМ 2: Родной Google AI Studio =================
+            else:
+                client = genai.Client(api_key=api_key)
+                config = types.GenerateContentConfig(
+                    system_instruction=combined_prompt,
+                    tools=ALL_TOOLS
+                )
+
+                history = []
+                for m in chat_obj["messages"]:
+                    if m["role"] == "user":
+                        history.append(types.Content(role="user", parts=[types.Part.from_text(text=m["content"])]))
+                    elif m["role"] == "agent":
+                        history.append(types.Content(role="model", parts=[types.Part.from_text(text=m["content"])]))
+
+                session = client.chats.create(
+                    model=model_name,
+                    config=config,
+                    history=history[:-1]
+                )
+
+                current_input = history[-1].parts[0].text
+
+                while True:
+                    stream = session.send_message_stream(current_input)
+                    accumulated_text = ""
+                    pending_function_calls = []
+                    stream_bubble = None
+
+                    for chunk in stream:
+                        if chunk.function_calls:
+                            pending_function_calls.extend(chunk.function_calls)
+                        if chunk.text:
+                            accumulated_text += chunk.text
+                            if not stream_bubble:
+                                stream_bubble = self._create_streaming_bubble()
+                            self._update_streaming_bubble(stream_bubble, accumulated_text)
+
+                    if pending_function_calls:
+                        for call in pending_function_calls:
+                            fn_name = call.name
+                            fn_args = dict(call.args)
+
+                            allowed = self._check_tool_allowed(fn_name, fn_args)
+                            if allowed:
+                                self._append_message("system", f"🛠️ Вызов {fn_name}: {fn_args}")
+                                func = TOOLS_DICT.get(fn_name)
+                                tool_res = func(**fn_args) if func else "Функция не найдена"
+                            else:
+                                tool_res = "Действие отменено пользователем."
+                                self._append_message("system", f"⛔ Отклонено пользователем: {fn_name}")
+
+                            current_input = types.Part.from_function_response(
+                                name=fn_name,
+                                response={"result": str(tool_res)}
+                            )
+                    else:
+                        if accumulated_text:
+                            chat_obj["messages"].append({"role": "agent", "content": accumulated_text})
+                            save_data(self.data)
+                        break
 
         except Exception as e:
             self._append_message("system", f"❌ Ошибка: {str(e)}")
@@ -694,27 +790,50 @@ class PyCodex(ctk.CTk):
 
     def open_settings(self):
         win = ctk.CTkToplevel(self)
-        win.title("Настройки")
-        win.geometry("540x570")
+        win.title("Настройки провайдеров и моделей")
+        win.geometry("540x620")
         win.configure(fg_color="#212121")
         win.grab_set()
 
-        # Иконка и для окна настроек
         try:
             if os.path.exists(ICON_PATH):
                 win.iconbitmap(ICON_PATH)
         except Exception:
             pass
 
-        ctk.CTkLabel(win, text="Google AI Studio API Key:", font=("Segoe UI", 12)).pack(anchor="w", padx=25, pady=(15, 2))
+        providers = load_providers()
+        prov_names = list(providers.keys())
+
+        ctk.CTkLabel(win, text="API Провайдер / Роутер:", font=("Segoe UI", 12)).pack(anchor="w", padx=25, pady=(15, 2))
+        cmb_provider = ctk.CTkComboBox(win, values=prov_names, fg_color="#2b2b2b", border_color="#444444", dropdown_fg_color="#2b2b2b")
+        curr_prov = self.data["settings"].get("provider", prov_names[0] if prov_names else "")
+        cmb_provider.set(curr_prov)
+        cmb_provider.pack(fill="x", padx=25)
+
+        ctk.CTkLabel(win, text="API Ключ:", font=("Segoe UI", 12)).pack(anchor="w", padx=25, pady=(10, 2))
         entry_api = ctk.CTkEntry(win, show="*", fg_color="#2b2b2b", border_color="#444444")
         entry_api.insert(0, self.data["settings"].get("api_key", ""))
         entry_api.pack(fill="x", padx=25)
 
-        ctk.CTkLabel(win, text="Бесплатная модель Gemini:", font=("Segoe UI", 12)).pack(anchor="w", padx=25, pady=(10, 2))
-        cmb_model = ctk.CTkComboBox(win, values=MODELS, fg_color="#2b2b2b", border_color="#444444", dropdown_fg_color="#2b2b2b")
-        cmb_model.set(self.data["settings"].get("model", "gemini-3.8-flash"))
+        ctk.CTkLabel(win, text="Модель:", font=("Segoe UI", 12)).pack(anchor="w", padx=25, pady=(10, 2))
+        cmb_model = ctk.CTkComboBox(win, values=[], fg_color="#2b2b2b", border_color="#444444", dropdown_fg_color="#2b2b2b")
         cmb_model.pack(fill="x", padx=25)
+
+        def update_models(selected_prov):
+            models_list = providers.get(selected_prov, {}).get("models", [])
+            cmb_model.configure(values=models_list)
+            if models_list:
+                cmb_model.set(models_list[0])
+
+        cmb_provider.configure(command=update_models)
+
+        initial_models = providers.get(curr_prov, {}).get("models", [])
+        cmb_model.configure(values=initial_models)
+        curr_model = self.data["settings"].get("model", "")
+        if curr_model in initial_models:
+            cmb_model.set(curr_model)
+        elif initial_models:
+            cmb_model.set(initial_models[0])
 
         ctk.CTkLabel(win, text="Режим работы:", font=("Segoe UI", 12)).pack(anchor="w", padx=25, pady=(10, 2))
         mode_var = ctk.StringVar(value=self.data["settings"].get("mode", "Default"))
@@ -724,11 +843,12 @@ class PyCodex(ctk.CTk):
         rb2.pack(anchor="w", padx=30, pady=2)
 
         ctk.CTkLabel(win, text="Пользовательский системный промпт (дополнительный):", font=("Segoe UI", 12)).pack(anchor="w", padx=25, pady=(10, 2))
-        txt_prompt = ctk.CTkTextbox(win, height=110, fg_color="#2b2b2b", border_color="#444444", border_width=1)
+        txt_prompt = ctk.CTkTextbox(win, height=100, fg_color="#2b2b2b", border_color="#444444", border_width=1)
         txt_prompt.insert("1.0", self.data["settings"].get("custom_prompt", DEFAULT_CUSTOM_PROMPT))
         txt_prompt.pack(fill="x", padx=25)
 
         def save_settings():
+            self.data["settings"]["provider"] = cmb_provider.get()
             self.data["settings"]["api_key"] = entry_api.get().strip()
             self.data["settings"]["model"] = cmb_model.get()
             self.data["settings"]["mode"] = mode_var.get()
