@@ -1,0 +1,18 @@
+{
+  "Google AI Studio": {
+    "base_url": "https://generativelanguage.googleapis.com/v1beta",
+    "models": [
+      "gemini-3.8-flash",
+      "gemini-3.5-flash-lite",
+      "gemini-3.1-flash-lite"
+    ]
+  },
+  "OpenRouter": {
+    "base_url": "https://openrouter.ai/api/v1",
+    "models": [
+      "nvidia/nemotron-3-ultra-550b-a55b:free",
+	  "poolside/laguna-s-2.1:free",
+	  "cohere/north-mini-code:free"
+    ]
+  }
+}
