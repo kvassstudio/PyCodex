@@ -61,8 +61,12 @@ except Exception:
 
 DEFAULT_PROVIDERS = {
     "Google AI Studio": {
-        "base_url": "",
-        "models": ["gemini-2.5-flash", "gemini-1.5-pro"]
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "models": ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro"]
+    },
+    "OpenRouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "models": ["nvidia/nemotron-3-ultra-550b-a55b:free", "poolside/laguna-s-2.1:free", "cohere/north-mini-code:free"]
     }
 }
 
@@ -240,7 +244,7 @@ OPENAI_TOOLS_SCHEMA = [
 def load_data():
     providers = load_providers()
     default_prov = list(providers.keys())[0] if providers else "Google AI Studio"
-    default_model = providers[default_prov]["models"][0] if providers and providers[default_prov]["models"] else "gemini-2.5-flash"
+    default_model = providers[default_prov]["models"][0] if providers and providers[default_prov]["models"] else "gemini-3.8-flash"
 
     if not os.path.exists(DATA_FILE):
         return {
@@ -330,10 +334,7 @@ class MarkdownLabel(tk.Text):
                 self.insert("end", "\n")
 
         self.configure(state="disabled")
-
-        total_rows = 0
-        for l in clean_lines:
-            total_rows += max(1, (len(l) // 72) + 1)
+        total_rows = sum(max(1, (len(l) // 72) + 1) for l in clean_lines)
         self.configure(height=max(1, total_rows))
 
     def _insert_formatted(self, text, base_tag):
@@ -379,7 +380,6 @@ class PyCodex(ctk.CTk):
         self._load_chats_to_sidebar()
 
     def _get_app_icon(self, size=(24, 24)):
-        """Загружает PyCodex.png или PyCodex.ico из папки проекта."""
         for ext in ["png", "ico", "jpg"]:
             path = os.path.join(SCRIPT_DIR, f"PyCodex.{ext}")
             if os.path.exists(path):
@@ -418,7 +418,6 @@ class PyCodex(ctk.CTk):
         self.logo_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         self.logo_frame.grid(row=0, column=0, padx=20, pady=(20, 15), sticky="ew")
 
-        # Иконка и название в сайдбаре
         sidebar_icon = self._get_app_icon(size=(26, 26))
         if sidebar_icon:
             self.lbl_logo_icon = ctk.CTkLabel(self.logo_frame, text="", image=sidebar_icon)
@@ -523,7 +522,7 @@ class PyCodex(ctk.CTk):
         return "break"
 
     def _update_badge(self):
-        m = self.data["settings"].get("model", "gemini-2.5-flash")
+        m = self.data["settings"].get("model", "gemini-3.8-flash")
         mode = self.data["settings"].get("mode", "Default")
         prefix = "⚡ Turbo" if mode == "Turbo" else "🛡️ Safe"
         self.badge_model.configure(text=f"{prefix} • {m}")
@@ -614,7 +613,6 @@ class PyCodex(ctk.CTk):
         wrapper = ctk.CTkFrame(self.messages_scroll, fg_color="transparent")
         wrapper.pack(expand=True, pady=60)
 
-        # Логотип по центру
         center_icon = self._get_app_icon(size=(56, 56))
         if center_icon:
             ctk.CTkLabel(wrapper, text="", image=center_icon).pack(pady=(0, 6))
@@ -716,56 +714,7 @@ class PyCodex(ctk.CTk):
         self.clipboard_clear()
         self.clipboard_append(text.strip())
 
-    # ================= ПОТОКОБЕЗОПАСНАЯ АНИМАЦИЯ =================
-    def _safe_scroll_down(self):
-        try:
-            if self.messages_scroll.winfo_exists():
-                self.messages_scroll._parent_canvas.yview_moveto(1.0)
-        except Exception:
-            pass
-
-    def _start_thinking_animation(self, status="Думает"):
-        self.after(0, lambda: self._ui_start_thinking(status))
-
-    def _ui_start_thinking(self, status):
-        self.current_status_text = status
-        if not self.thinking_frame:
-            self.thinking_frame = ctk.CTkFrame(self.messages_scroll, fg_color=THEME["badge_bg"], corner_radius=20, border_width=1, border_color=THEME["border"])
-            self.thinking_frame.pack(side="top", anchor="w", padx=15, pady=4)
-
-            self.thinking_label = ctk.CTkLabel(
-                self.thinking_frame, text="", font=("Segoe UI", 11, "bold"),
-                text_color=THEME["accent_glow"]
-            )
-            self.thinking_label.pack(padx=14, pady=6)
-            self._tick_thinking()
-
-    def _tick_thinking(self):
-        if not self.is_generating or not self.thinking_frame or not self.thinking_label:
-            return
-        if not self.thinking_label.winfo_exists():
-            return
-        frame_ch = self.spinner_frames[self.spinner_idx % len(self.spinner_frames)]
-        self.spinner_idx += 1
-        try:
-            self.thinking_label.configure(text=f"{frame_ch}  {self.current_status_text}")
-            self._safe_scroll_down()
-            self.after(110, self._tick_thinking)
-        except Exception:
-            pass
-
-    def _stop_thinking_animation(self):
-        self.after(0, self._ui_stop_thinking)
-
-    def _ui_stop_thinking(self):
-        if self.thinking_frame and self.thinking_frame.winfo_exists():
-            try:
-                self.thinking_frame.destroy()
-            except Exception:
-                pass
-        self.thinking_frame = None
-        self.thinking_label = None
-
+    # ================= СТРИМИНГ БУБЛОВ =================
     def _create_stream_bubble(self):
         evt = threading.Event()
         holder = [None, None]
@@ -804,7 +753,7 @@ class PyCodex(ctk.CTk):
                 pass
         self.after(0, update)
 
-    # ================= ОТПРАВКА И ЛОГИКА =================
+    # ================= ФАЙЛЫ И ОТПРАВКА =================
     def attach_file(self):
         f = filedialog.askopenfilename()
         if f:
@@ -861,6 +810,7 @@ class PyCodex(ctk.CTk):
         else:
             self.after(0, add)
 
+    # ================= ЛОГИКА АГЕНТА =================
     def _run_agent(self):
         try:
             providers = load_providers()
@@ -868,12 +818,13 @@ class PyCodex(ctk.CTk):
             prov_config = providers.get(prov_name, {})
             base_url = prov_config.get("base_url", "").strip()
             api_key = self.data["settings"]["api_key"]
-            model_name = self.data["settings"].get("model", "gemini-2.5-flash")
+            model_name = self.data["settings"].get("model", "gemini-3.8-flash")
 
             chat_obj = next(c for c in self.data["chats"] if c["id"] == self.current_chat_id)
             combined_prompt = f"{CORE_SYSTEM_PROMPT}\n\n[Пользовательские установки]:\n{self.data['settings'].get('custom_prompt', '')}"
 
-            if base_url:
+            if base_url and prov_name != "Google AI Studio":
+                # OpenRouter и прочие OpenAI-совместимые провайдеры
                 client = OpenAI(base_url=base_url, api_key=api_key)
                 messages = [{"role": "system", "content": combined_prompt}]
                 for m in chat_obj["messages"]:
@@ -944,6 +895,7 @@ class PyCodex(ctk.CTk):
                             save_data(self.data)
                         break
             else:
+                # Нативный клиент Google AI Studio (с исправлениями для мульти-инструментов)
                 client = genai.Client(api_key=api_key)
                 config = types.GenerateContentConfig(system_instruction=combined_prompt, tools=ALL_TOOLS)
                 history = [
@@ -974,6 +926,7 @@ class PyCodex(ctk.CTk):
                         self._update_stream_bubble(stream_lbl, acc_text, is_done=True)
 
                     if pending_calls:
+                        response_parts = []
                         for call in pending_calls:
                             fn = call.name
                             args = dict(call.args)
@@ -985,8 +938,14 @@ class PyCodex(ctk.CTk):
                                 res = "Отменено пользователем."
                                 self._append_message("system", f"⛔ Отклонено: {fn}")
 
-                            curr_inp = types.Part.from_function_response(name=fn, response={"result": str(res)})
-                            self._start_thinking_animation("Синтез данных")
+                            response_parts.append(
+                                types.Part.from_function_response(
+                                    name=fn, 
+                                    response={"result": str(res)}
+                                )
+                            )
+                        curr_inp = response_parts
+                        self._start_thinking_animation("Синтез данных")
                     else:
                         if acc_text:
                             chat_obj["messages"].append({"role": "agent", "content": acc_text})
@@ -1014,6 +973,52 @@ class PyCodex(ctk.CTk):
         self.after(0, ask)
         evt.wait()
         return allowed[0]
+
+    # ================= АНИМАЦИЯ ДУМАЙТЕЛЬНЫХ БУБЛОВ =================
+    def _start_thinking_animation(self, status="Думает"):
+        self.after(0, lambda: self._ui_start_thinking(status))
+
+    def _ui_start_thinking(self, status):
+        self.current_status_text = status
+        if not self.thinking_frame:
+            self.thinking_frame = ctk.CTkFrame(self.messages_scroll, fg_color=THEME["badge_bg"], corner_radius=20, border_width=1, border_color=THEME["border"])
+            self.thinking_frame.pack(side="top", anchor="w", padx=15, pady=4)
+
+            self.thinking_label = ctk.CTkLabel(
+                self.thinking_frame, text="", font=("Segoe UI", 11, "bold"),
+                text_color=THEME["accent_glow"]
+            )
+            self.thinking_label.pack(padx=14, pady=6)
+            self._tick_thinking()
+
+    def _ui_stop_thinking(self):
+        if self.thinking_frame and self.thinking_frame.winfo_exists():
+            self.thinking_frame.destroy()
+            self.thinking_frame = None
+            self.thinking_label = None
+
+    def _stop_thinking_animation(self):
+        self.after(0, self._ui_stop_thinking)
+
+    def _tick_thinking(self):
+        if not self.is_generating or not self.thinking_frame or not self.thinking_label:
+            return
+        if not self.thinking_label.winfo_exists():
+            return
+        frame_ch = self.spinner_frames[self.spinner_idx % len(self.spinner_frames)]
+        self.spinner_idx += 1
+        try:
+            self.thinking_label.configure(text=f"{frame_ch}  {self.current_status_text}")
+        except Exception:
+            pass
+        self.after(120, self._tick_thinking)
+
+    def _safe_scroll_down(self):
+        try:
+            if self.messages_scroll.winfo_exists():
+                self.messages_scroll._parent_canvas.yview_moveto(1.0)
+        except Exception:
+            pass
 
     # ================= НАСТРОЙКИ =================
     def open_settings(self):
